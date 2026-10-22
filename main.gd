@@ -110,6 +110,10 @@ var bullets: Array = []
 var gems: Array = []
 ## The three upgrades currently offered on the level-up screen.
 var choices: Array = []
+## Focused level-up card for controller navigation.
+var selected_choice := 0
+## Requires the horizontal stick to return to neutral before moving focus again.
+var choice_axis_held := false
 
 # --- Touch joystick ---
 ## Index of the finger driving the virtual joystick, or -1 if none.
@@ -181,12 +185,22 @@ func _go(next: String) -> void:
 	get_tree().reload_current_scene()
 
 
-## True for the "button down" of a screen touch or a non-repeating key press.
+## True for a touch, non-repeating key press, or controller confirm (A / Cross).
 ## Mouse clicks arrive as touches because of the project setting
 ## [code]emulate_touch_from_mouse[/code].
 func _is_press(event: InputEvent) -> bool:
 	return (event is InputEventScreenTouch and event.pressed) \
-		or (event is InputEventKey and event.pressed and not event.echo)
+		or (event is InputEventKey and event.pressed and not event.echo) \
+		or (event is InputEventJoypadButton and event.pressed and event.button_index == JOY_BUTTON_A)
+
+
+## Handle controller submission before the focused LineEdit consumes UI actions.
+## A blank name still uses the existing "Anonym" fallback.
+func _input(event: InputEvent) -> void:
+	if state == "name" and event is InputEventJoypadButton \
+			and event.pressed and event.button_index == JOY_BUTTON_A:
+		_submit_name()
+		get_viewport().set_input_as_handled()
 
 
 ## Switches to the [code]name[/code] state and builds the name-entry UI from code:
@@ -279,11 +293,28 @@ func _unhandled_input(event: InputEvent) -> void:
 		stick_vec = ((event.position - stick_origin) / 80.0).limit_length(1.0)
 
 
-## Handles picking an upgrade on the level-up screen via keys 1-3 or by tapping a
-## card, then resumes play and resets the joystick so it doesn't stay "stuck".
+## Keys 1-3 and taps select directly. A controller navigates with D-pad left/right
+## or the left stick, then confirms with A / Cross. Stick hysteresis avoids rapid
+## repeated navigation from multiple motion events near the deadzone.
 func _handle_choice_input(event: InputEvent) -> void:
 	var idx := -1
-	if event is InputEventKey and event.pressed and event.keycode >= KEY_1 and event.keycode <= KEY_3:
+	if choices.is_empty():
+		return
+	if event is InputEventJoypadButton and event.pressed:
+		match event.button_index:
+			JOY_BUTTON_DPAD_LEFT:
+				selected_choice = wrapi(selected_choice - 1, 0, choices.size())
+			JOY_BUTTON_DPAD_RIGHT:
+				selected_choice = wrapi(selected_choice + 1, 0, choices.size())
+			JOY_BUTTON_A:
+				idx = selected_choice
+	elif event is InputEventJoypadMotion and event.axis == JOY_AXIS_LEFT_X:
+		if absf(event.axis_value) < 0.25:
+			choice_axis_held = false
+		elif absf(event.axis_value) >= 0.5 and not choice_axis_held:
+			selected_choice = wrapi(selected_choice + int(signf(event.axis_value)), 0, choices.size())
+			choice_axis_held = true
+	elif event is InputEventKey and event.pressed and not event.echo and event.keycode >= KEY_1 and event.keycode <= KEY_3:
 		idx = event.keycode - KEY_1
 	elif event is InputEventScreenTouch and event.pressed:
 		idx = _choice_at(event.position)
@@ -485,6 +516,8 @@ func _open_levelup() -> void:
 	var pool := UPGRADES.duplicate()
 	pool.shuffle()
 	choices = pool.slice(0, 3)
+	selected_choice = 0
+	choice_axis_held = false
 	state = "levelup"
 
 
@@ -553,7 +586,7 @@ func _draw_menu(tl: Vector2, vp: Vector2) -> void:
 	if last_score >= 0:
 		draw_string(font, tl + Vector2(0, vp.y - 90), "Letzter Score: %d" % last_score, HORIZONTAL_ALIGNMENT_CENTER, vp.x, 22, Color(1, 1, 1, 0.7))
 	var pulse := 0.6 + 0.4 * sin(Time.get_ticks_msec() / 300.0)
-	draw_string(font, tl + Vector2(0, vp.y - 40), "Tippen / Enter zum Starten", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 28, Color(0.3, 1.0, 0.5, pulse))
+	draw_string(font, tl + Vector2(0, vp.y - 40), "Tippen / Enter / A zum Starten", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 28, Color(0.3, 1.0, 0.5, pulse))
 
 
 ## Draws the HUD and the state-dependent overlays on top of the world: XP bar
@@ -580,12 +613,13 @@ func _draw_hud(tl: Vector2, vp: Vector2) -> void:
 	if state == "levelup":
 		draw_rect(Rect2(tl, vp), Color(0, 0, 0, 0.6))
 		draw_string(font, tl + Vector2(0, vp.y / 2.0 - 130), "LEVEL UP!", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 40)
+		draw_string(font, tl + Vector2(0, vp.y / 2.0 + 140), "Controller: Links/Rechts, A zum Bestätigen", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 22)
 		for i in choices.size():
 			# _choice_rect() is in screen space, so shift it into world space.
 			var r := _choice_rect(i, vp)
 			r.position += tl
 			draw_rect(r, Color(0.15, 0.17, 0.25))
-			draw_rect(r, Color(0.5, 0.6, 1.0), false, 2.0)
+			draw_rect(r, Color(1.0, 0.9, 0.3) if i == selected_choice else Color(0.5, 0.6, 1.0), false, 3.0 if i == selected_choice else 2.0)
 			draw_string(font, r.position + Vector2(0, 70), "[%d] %s" % [i + 1, choices[i].name], HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 22)
 			draw_string(font, r.position + Vector2(0, 110), choices[i].desc, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 18)
 	elif state == "dead":
@@ -593,7 +627,7 @@ func _draw_hud(tl: Vector2, vp: Vector2) -> void:
 		draw_string(font, tl + Vector2(0, vp.y / 2.0 - 20), "GAME OVER", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 48)
 		draw_string(font, tl + Vector2(0, vp.y / 2.0 + 30), "Score: %d" % score, HORIZONTAL_ALIGNMENT_CENTER, vp.x, 28)
 		if time_dead > 0.8:
-			draw_string(font, tl + Vector2(0, vp.y / 2.0 + 75), "Taste / Tippen zum Fortfahren", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 22)
+			draw_string(font, tl + Vector2(0, vp.y / 2.0 + 75), "Taste / Tippen / A zum Fortfahren", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 22)
 	elif state == "name":
 		# Backdrop only; the entry form is made of Control nodes on a CanvasLayer.
 		draw_rect(Rect2(tl, vp), Color(0.07, 0.08, 0.12, 0.92))

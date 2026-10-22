@@ -22,6 +22,12 @@ Ein actionreiches Survivors-like (Vampire-Survivors-Stil), gebaut mit **Godot 4*
 
 Mausklicks werden als Touch behandelt (`emulate_touch_from_mouse`).
 
+**Controller:** A / Cross startet das Spiel und bestätigt nach Game Over. Bei
+einem Level-Up wählst du mit D-Pad links/rechts oder dem linken Stick eine
+gelb markierte Karte und bestätigst mit A / Cross. Den Stick zwischen zwei
+Schritten loslassen. Bei der Namenseingabe speichert A / Cross den Namen
+(ohne Eingabe als „Anonym“); für eigenen Text wird eine Tastatur benötigt.
+
 ## Startseite und Bestenliste
 
 - Das Spiel startet auf einer Startseite mit den **Top 10 Highscores** (Rang, Name, Score) und dem Score des letzten Laufs.
@@ -50,6 +56,15 @@ Voraussetzung: [Godot 4.x](https://godotengine.org/) (getestet mit 4.7.2).
 brew install --cask godot        # macOS
 godot --path .                   # Spiel starten
 godot --path . --editor          # Im Editor öffnen
+```
+
+## Regressionstests
+
+Die Tests laufen ohne zusätzliche Pakete und ohne die gespeicherten Spielstände
+zu verändern:
+
+```sh
+godot --headless --path . --script tests/test_controller.gd
 ```
 
 ## Web-Export und Veröffentlichung (GitHub Pages)
