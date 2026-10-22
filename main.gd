@@ -138,18 +138,52 @@ func _ready() -> void:
 # Highscores
 # ---------------------------------------------------------------------------
 
-## Reads the highscore list from disk. Malformed or missing data yields an empty
-## list, and individual invalid entries are skipped.
+## Reads and normalizes the persisted leaderboard. A missing file is expected on
+## first launch; unreadable or malformed existing data is reported explicitly.
 func _load_scores() -> Array:
 	if not FileAccess.file_exists(SCORE_FILE):
 		return []
-	var data = JSON.parse_string(FileAccess.get_file_as_string(SCORE_FILE))
+	var file := FileAccess.open(SCORE_FILE, FileAccess.READ)
+	if file == null:
+		push_error("Cannot read highscores: %s" % error_string(FileAccess.get_open_error()))
+		return []
+	var json := JSON.new()
+	var error := json.parse(file.get_as_text())
+	if error != OK:
+		push_warning("Invalid highscore JSON: %s" % json.get_error_message())
+		return []
+	return _normalize_scores(json.data)
+
+
+## Keep only named, positive integer scores, sorted descending and limited to ten.
+## JSON represents numbers as floats, so integral floats are accepted too. Reject
+## non-finite, fractional or out-of-range values before converting them to int.
+func _normalize_scores(data: Variant) -> Array:
 	var out: Array = []
-	if data is Array:
-		for d in data:
-			if d is Dictionary and d.has("name") and d.has("score"):
-				out.append({"name": str(d.name), "score": int(d.score)})
-	return out
+	if not data is Array:
+		push_warning("Highscores must be a JSON array.")
+		return out
+	var rejected := 0
+	for entry in data:
+		if not entry is Dictionary or not entry.get("name") is String:
+			rejected += 1
+			continue
+		var value: Variant = entry.get("score")
+		if not (value is int or value is float):
+			rejected += 1
+			continue
+		if value <= 0 or (value is float and (
+				not is_finite(value) or value != floorf(value) or value >= 9223372036854775808.0)):
+			rejected += 1
+			continue
+		var player_name: String = entry.name.strip_edges().left(12)
+		if player_name.is_empty():
+			player_name = "Anonym"
+		out.append({"name": player_name, "score": int(value)})
+	if rejected > 0:
+		push_warning("Skipped %d invalid highscore entries." % rejected)
+	out.sort_custom(func(a, b): return a.score > b.score)
+	return out.slice(0, MAX_SCORES)
 
 
 ## Writes the current [member scores] list to disk as JSON.
@@ -159,18 +193,24 @@ func _save_scores() -> void:
 		f.store_string(JSON.stringify(scores))
 
 
-## Returns true if [param sc] belongs in the top-10 list: it must be positive and
-## either there is a free slot or it beats the current last place.
+## A positive score qualifies if fewer than ten existing entries rank at least
+## as high. This does not rely on the order or length of the in-memory array.
+## Ties do not displace an existing entry when the leaderboard is full.
 func _qualifies(sc: int) -> bool:
-	return sc > 0 and (scores.size() < MAX_SCORES or sc > int(scores[-1].score))
+	if sc <= 0:
+		return false
+	var ahead := 0
+	for entry in scores:
+		if entry.score >= sc:
+			ahead += 1
+	return ahead < MAX_SCORES
 
 
 ## Inserts the current [member score] under [param player_name], keeps the list
 ## sorted and trimmed to [constant MAX_SCORES], and persists it.
 func _add_score(player_name: String) -> void:
 	scores.append({"name": player_name, "score": score})
-	scores.sort_custom(func(a, b): return a.score > b.score)
-	scores = scores.slice(0, MAX_SCORES)
+	scores = _normalize_scores(scores)
 	_save_scores()
 
 

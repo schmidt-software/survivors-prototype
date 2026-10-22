@@ -32,6 +32,9 @@ Schritten loslassen. Bei der Namenseingabe speichert A / Cross den Namen
 
 - Das Spiel startet auf einer Startseite mit den **Top 10 Highscores** (Rang, Name, Score) und dem Score des letzten Laufs.
 - **Score** = Kills × 10 + überlebte Sekunden.
+- Gespeicherte Listen werden beim Laden geprüft, absteigend sortiert und auf zehn
+  Einträge begrenzt. Ungültige Einträge werden mit einer Warnung verworfen.
+  Ein Gleichstand verdrängt keinen bestehenden Eintrag einer vollen Liste.
 - Reicht ein Score für die Top 10, erscheint nach dem Game Over ein Eingabefeld für den Namen (max. 12 Zeichen, leer ergibt „Anonym").
 - **Speicherort:** lokal in `user://highscores.json`. Im Browser liegt das im IndexedDB des jeweiligen Browsers, auf dem Desktop im Godot-User-Verzeichnis. Die Liste ist also pro Gerät und Browser getrennt und geht verloren, wenn Website-Daten gelöscht werden. Eine gemeinsame Online-Bestenliste bräuchte ein Backend.
 
@@ -65,6 +68,7 @@ zu verändern:
 
 ```sh
 godot --headless --path . --script tests/test_controller.gd
+godot --headless --path . --script tests/test_highscores.gd
 ```
 
 ## Web-Export und Veröffentlichung (GitHub Pages)
