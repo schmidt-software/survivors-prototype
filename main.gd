@@ -10,7 +10,8 @@
 ## joystick that appears where the finger first touches the screen).
 ##
 ## Architecture notes:
-## - No external assets: everything is rendered through [method _draw].
+## - No external assets: gameplay is rendered through [method _draw], while menu
+##   and name-entry forms use Control nodes for layout, scrolling and text input.
 ## - Entities (enemies, bullets, gems) are plain Dictionaries kept in Arrays instead
 ##   of nodes. That keeps hundreds of entities cheap, at the cost of manual collision
 ##   handling (see [method _update]).
@@ -100,6 +101,13 @@ var score := 0
 var qualifies := false
 var name_edit: LineEdit
 var ui_layer: CanvasLayer
+## Menu controls stay in screen space; containers handle resizing and scrolling.
+var menu_title: Label
+var menu_margin: MarginContainer
+var menu_subtitle: Label
+var menu_scroll: ScrollContainer
+var menu_last_score: Label
+var menu_start_button: Button
 
 # --- Entities (Dictionaries; see the spawn functions for the exact fields) ---
 ## Enemy: [code]{pos, hp, speed, r (radius), dmg (damage per second on contact), kind}[/code].
@@ -132,24 +140,60 @@ func _ready() -> void:
 	scores = _load_scores()
 	state = pending_state
 	pending_state = "menu"
+	if state == "menu":
+		_build_menu()
 
 
 # ---------------------------------------------------------------------------
 # Highscores
 # ---------------------------------------------------------------------------
 
-## Reads the highscore list from disk. Malformed or missing data yields an empty
-## list, and individual invalid entries are skipped.
+## Reads and normalizes the persisted leaderboard. A missing file is expected on
+## first launch; unreadable or malformed existing data is reported explicitly.
 func _load_scores() -> Array:
 	if not FileAccess.file_exists(SCORE_FILE):
 		return []
-	var data = JSON.parse_string(FileAccess.get_file_as_string(SCORE_FILE))
+	var file := FileAccess.open(SCORE_FILE, FileAccess.READ)
+	if file == null:
+		push_error("Cannot read highscores: %s" % error_string(FileAccess.get_open_error()))
+		return []
+	var json := JSON.new()
+	var error := json.parse(file.get_as_text())
+	if error != OK:
+		push_warning("Invalid highscore JSON: %s" % json.get_error_message())
+		return []
+	return _normalize_scores(json.data)
+
+
+## Keep only named, positive integer scores, sorted descending and limited to ten.
+## JSON represents numbers as floats, so integral floats are accepted too. Reject
+## non-finite, fractional or out-of-range values before converting them to int.
+func _normalize_scores(data: Variant) -> Array:
 	var out: Array = []
-	if data is Array:
-		for d in data:
-			if d is Dictionary and d.has("name") and d.has("score"):
-				out.append({"name": str(d.name), "score": int(d.score)})
-	return out
+	if not data is Array:
+		push_warning("Highscores must be a JSON array.")
+		return out
+	var rejected := 0
+	for entry in data:
+		if not entry is Dictionary or not entry.get("name") is String:
+			rejected += 1
+			continue
+		var value: Variant = entry.get("score")
+		if not (value is int or value is float):
+			rejected += 1
+			continue
+		if value <= 0 or (value is float and (
+				not is_finite(value) or value != floorf(value) or value >= 9223372036854775808.0)):
+			rejected += 1
+			continue
+		var player_name: String = entry.name.strip_edges().left(12)
+		if player_name.is_empty():
+			player_name = "Anonym"
+		out.append({"name": player_name, "score": int(value)})
+	if rejected > 0:
+		push_warning("Skipped %d invalid highscore entries." % rejected)
+	out.sort_custom(func(a, b): return a.score > b.score)
+	return out.slice(0, MAX_SCORES)
 
 
 ## Writes the current [member scores] list to disk as JSON.
@@ -159,18 +203,24 @@ func _save_scores() -> void:
 		f.store_string(JSON.stringify(scores))
 
 
-## Returns true if [param sc] belongs in the top-10 list: it must be positive and
-## either there is a free slot or it beats the current last place.
+## A positive score qualifies if fewer than ten existing entries rank at least
+## as high. This does not rely on the order or length of the in-memory array.
+## Ties do not displace an existing entry when the leaderboard is full.
 func _qualifies(sc: int) -> bool:
-	return sc > 0 and (scores.size() < MAX_SCORES or sc > int(scores[-1].score))
+	if sc <= 0:
+		return false
+	var ahead := 0
+	for entry in scores:
+		if entry.score >= sc:
+			ahead += 1
+	return ahead < MAX_SCORES
 
 
 ## Inserts the current [member score] under [param player_name], keeps the list
 ## sorted and trimmed to [constant MAX_SCORES], and persists it.
 func _add_score(player_name: String) -> void:
 	scores.append({"name": player_name, "score": score})
-	scores.sort_custom(func(a, b): return a.score > b.score)
-	scores = scores.slice(0, MAX_SCORES)
+	scores = _normalize_scores(scores)
 	_save_scores()
 
 
@@ -256,7 +306,8 @@ func _submit_name() -> void:
 
 ## Central input dispatcher; behaviour depends on [member state].
 ## [br]- [code]name[/code]: ignored, the Control nodes handle their own input.
-## [br]- [code]menu[/code]: any press (except Escape) starts a run.
+## [br]- [code]menu[/code]: Enter / Space / controller A starts a run. Pointer
+## input is handled by the start button, leaving the leaderboard free to scroll.
 ## [br]- [code]dead[/code]: after 0.8 s a press continues to name entry or the menu.
 ## [br]- [code]levelup[/code]: forwarded to [method _handle_choice_input].
 ## [br]- [code]play[/code]: touch events drive the floating virtual joystick.
@@ -265,7 +316,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if state == "name":
 		return
 	if state == "menu":
-		if _is_press(event) and not (event is InputEventKey and event.keycode == KEY_ESCAPE):
+		if _is_press(event) and (
+				event is InputEventJoypadButton or (
+				event is InputEventKey and event.keycode in [KEY_ENTER, KEY_KP_ENTER, KEY_SPACE])):
 			_go("play")
 		return
 	if state == "dead":
@@ -533,7 +586,7 @@ func _draw() -> void:
 	var tl := player_pos - vp / 2.0
 
 	if state == "menu":
-		_draw_menu(tl, vp)
+		draw_rect(Rect2(tl, vp), Color(0.07, 0.08, 0.12))
 		return
 
 	# Endless scrolling grid: lines are snapped to multiples of the cell size so
@@ -558,35 +611,94 @@ func _draw() -> void:
 	_draw_hud(tl, vp)
 
 
-## Draws the start screen: title, the top-10 table (empty slots are dimmed), the
-## last score and a pulsing start hint. The entry matching [member last_score] is
-## highlighted in yellow. [param tl] is the top-left corner of the visible area.
-func _draw_menu(tl: Vector2, vp: Vector2) -> void:
-	var font := ThemeDB.fallback_font
-	draw_rect(Rect2(tl, vp), Color(0.07, 0.08, 0.12))
-	draw_string(font, tl + Vector2(0, 90), "SURVIVORS", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 64)
-	draw_string(font, tl + Vector2(0, 135), "Bestenliste – Top %d" % MAX_SCORES, HORIZONTAL_ALIGNMENT_CENTER, vp.x, 24)
-	# Row height shrinks on short screens so all rows still fit above the footer.
-	var row_h := minf(34.0, (vp.y - 300.0) / MAX_SCORES)
-	var left := vp.x / 2.0 - 170.0
+## Build a screen-space menu with fixed-height rows in a ScrollContainer. Unlike
+## shrinking draw offsets, this preserves readable text on short viewports. The
+## header and start button remain outside the scrolling region.
+func _build_menu() -> void:
+	ui_layer = CanvasLayer.new()
+	add_child(ui_layer)
+	menu_margin = MarginContainer.new()
+	ui_layer.add_child(menu_margin)
+	menu_margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	for side in ["left", "top", "right", "bottom"]:
+		menu_margin.add_theme_constant_override("margin_" + side, 12)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 6)
+	menu_margin.add_child(column)
+	menu_title = Label.new()
+	menu_title.text = "SURVIVORS"
+	menu_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.add_child(menu_title)
+	menu_subtitle = Label.new()
+	menu_subtitle.text = "Bestenliste – Top %d" % MAX_SCORES
+	menu_subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.add_child(menu_subtitle)
+	menu_scroll = ScrollContainer.new()
+	menu_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	menu_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	menu_scroll.follow_focus = true
+	column.add_child(menu_scroll)
+	var rows := VBoxContainer.new()
+	rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rows.add_theme_constant_override("separation", 2)
+	menu_scroll.add_child(rows)
 	var highlighted := false
 	for i in MAX_SCORES:
-		var y := 180.0 + i * row_h
-		var col := Color(1, 1, 1, 0.9)
+		var row := HBoxContainer.new()
+		row.custom_minimum_size.y = 32
+		rows.add_child(row)
+		var rank := Label.new()
+		rank.text = "%2d." % (i + 1)
+		rank.custom_minimum_size.x = 36
+		row.add_child(rank)
+		var player_name := Label.new()
+		player_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		player_name.clip_text = true
+		row.add_child(player_name)
+		var points := Label.new()
+		points.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		row.add_child(points)
+		var color := Color(1, 1, 1, 0.9)
 		if i < scores.size():
-			# Only the first entry with the last score is highlighted (ties).
 			if not highlighted and last_score >= 0 and scores[i].score == last_score:
-				col = Color(1.0, 0.9, 0.3)
+				color = Color(1.0, 0.9, 0.3)
 				highlighted = true
-			draw_string(font, tl + Vector2(left, y), "%2d." % (i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 22, col)
-			draw_string(font, tl + Vector2(left + 50, y), scores[i].name, HORIZONTAL_ALIGNMENT_LEFT, 180, 22, col)
-			draw_string(font, tl + Vector2(left, y), str(scores[i].score), HORIZONTAL_ALIGNMENT_RIGHT, 340, 22, col)
+			player_name.text = scores[i].name
+			points.text = str(scores[i].score)
 		else:
-			draw_string(font, tl + Vector2(left, y), "%2d.  –" % (i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color(1, 1, 1, 0.3))
-	if last_score >= 0:
-		draw_string(font, tl + Vector2(0, vp.y - 90), "Letzter Score: %d" % last_score, HORIZONTAL_ALIGNMENT_CENTER, vp.x, 22, Color(1, 1, 1, 0.7))
-	var pulse := 0.6 + 0.4 * sin(Time.get_ticks_msec() / 300.0)
-	draw_string(font, tl + Vector2(0, vp.y - 40), "Tippen / Enter / A zum Starten", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 28, Color(0.3, 1.0, 0.5, pulse))
+			player_name.text = "–"
+			color = Color(1, 1, 1, 0.3)
+		for label in [rank, player_name, points]:
+			label.add_theme_font_size_override("font_size", 22)
+			label.add_theme_color_override("font_color", color)
+	menu_last_score = Label.new()
+	menu_last_score.text = "Letzter Score: %d" % last_score
+	menu_last_score.visible = last_score >= 0
+	menu_last_score.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	menu_last_score.add_theme_font_size_override("font_size", 18)
+	column.add_child(menu_last_score)
+	menu_start_button = Button.new()
+	menu_start_button.text = "Spielen (Enter / A)"
+	# Keyboard/controller confirmation is handled centrally, not by UI focus.
+	menu_start_button.focus_mode = Control.FOCUS_NONE
+	menu_start_button.pressed.connect(_go.bind("play"))
+	column.add_child(menu_start_button)
+	get_viewport().size_changed.connect(_resize_menu)
+	_resize_menu()
+
+
+## Use a compact header on short or narrow viewports without shrinking table text.
+func _resize_menu() -> void:
+	var vp := get_viewport_rect().size
+	var compact := vp.y < 480.0 or vp.x < 600.0
+	menu_margin.add_theme_constant_override("margin_top", 8 if compact else 12)
+	menu_margin.add_theme_constant_override("margin_bottom", 8 if compact else 12)
+	var column: VBoxContainer = menu_margin.get_child(0)
+	column.add_theme_constant_override("separation", 4 if compact else 6)
+	menu_title.add_theme_font_size_override("font_size", 32 if compact else 64)
+	menu_subtitle.add_theme_font_size_override("font_size", 18 if compact else 24)
+	menu_start_button.add_theme_font_size_override("font_size", 20 if compact else 28)
+	menu_start_button.custom_minimum_size.y = 36 if compact else 48
 
 
 ## Draws the HUD and the state-dependent overlays on top of the world: XP bar

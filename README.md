@@ -18,7 +18,8 @@ Ein actionreiches Survivors-like (Vampire-Survivors-Stil), gebaut mit **Godot 4*
 |---|---|---|
 | Bewegen | WASD, Pfeiltasten, Gamepad | Finger ziehen (virtueller Joystick an der Aufsetzstelle) |
 | Upgrade wählen | Taste `1`–`3` oder Klick | Karte antippen |
-| Start / Fortfahren | Enter, Leertaste oder Klick | Tippen |
+| Start | Enter, Leertaste oder Klick auf „Spielen“ | „Spielen“ antippen |
+| Fortfahren nach Game Over | Beliebige Taste oder Klick | Tippen |
 
 Mausklicks werden als Touch behandelt (`emulate_touch_from_mouse`).
 
@@ -31,7 +32,14 @@ Schritten loslassen. Bei der Namenseingabe speichert A / Cross den Namen
 ## Startseite und Bestenliste
 
 - Das Spiel startet auf einer Startseite mit den **Top 10 Highscores** (Rang, Name, Score) und dem Score des letzten Laufs.
+- Bei wenig Platz ist die Bestenliste scrollbar (Mausrad oder Finger ziehen).
+  Titel und Startknopf bleiben sichtbar; die Schrift der Einträge bleibt lesbar.
+  Das Scrollen startet keinen Lauf: Nutze dafür „Spielen“, Enter, Leertaste oder
+  die Controller-Bestätigung.
 - **Score** = Kills × 10 + überlebte Sekunden.
+- Gespeicherte Listen werden beim Laden geprüft, absteigend sortiert und auf zehn
+  Einträge begrenzt. Ungültige Einträge werden mit einer Warnung verworfen.
+  Ein Gleichstand verdrängt keinen bestehenden Eintrag einer vollen Liste.
 - Reicht ein Score für die Top 10, erscheint nach dem Game Over ein Eingabefeld für den Namen (max. 12 Zeichen, leer ergibt „Anonym").
 - **Speicherort:** lokal in `user://highscores.json`. Im Browser liegt das im IndexedDB des jeweiligen Browsers, auf dem Desktop im Godot-User-Verzeichnis. Die Liste ist also pro Gerät und Browser getrennt und geht verloren, wenn Website-Daten gelöscht werden. Eine gemeinsame Online-Bestenliste bräuchte ein Backend.
 
@@ -43,10 +51,15 @@ survivors/
 ├── main.tscn            # Einzige Szene (Node2D + Skript)
 ├── main.gd              # Gesamte Spiellogik, Zeichnen und UI
 ├── export_presets.cfg   # Web-Export-Preset (Ausgabe nach docs/)
+├── tests/               # Headless-Regressionstests ohne zusätzliche Pakete
 └── docs/                # Fertiger Web-Export, wird von GitHub Pages ausgeliefert
 ```
 
-Der Prototyp benötigt keine externen Assets: Alles wird per `_draw()` gezeichnet. Spielzustände in `main.gd`: `menu`, `play`, `levelup`, `dead`, `name`. Ein Neustart erfolgt über `reload_current_scene()`; der nächste Zustand wird in der statischen Variable `pending_state` übergeben.
+Der Prototyp benötigt keine externen Assets: Das Spielfeld wird per `_draw()`
+gezeichnet; Startseite und Namenseingabe verwenden Godot-Control-Nodes für Layout,
+Scrollen und Texteingabe. Spielzustände in `main.gd`: `menu`, `play`, `levelup`,
+`dead`, `name`. Ein Neustart erfolgt über `reload_current_scene()`; der nächste
+Zustand wird in der statischen Variable `pending_state` übergeben.
 
 ## Lokal entwickeln
 
@@ -65,6 +78,8 @@ zu verändern:
 
 ```sh
 godot --headless --path . --script tests/test_controller.gd
+godot --headless --path . --script tests/test_highscores.gd
+godot --headless --path . --script tests/test_menu_layout.gd
 ```
 
 ## Web-Export und Veröffentlichung (GitHub Pages)
