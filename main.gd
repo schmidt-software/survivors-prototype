@@ -20,7 +20,20 @@ var time_alive := 0.0
 var spawn_acc := 0.0
 var fire_acc := 0.0
 var kills := 0
-var state := "play"  # play | levelup | dead
+var time_dead := 0.0
+var state := "menu"  # menu | play | levelup | dead | name
+
+# Survives scene reloads: which state the next run starts in, and the last score.
+static var pending_state := "menu"
+static var last_score := -1
+
+const SCORE_FILE := "user://highscores.json"
+const MAX_SCORES := 10
+var scores: Array = []
+var score := 0
+var qualifies := false
+var name_edit: LineEdit
+var ui_layer: CanvasLayer
 
 var enemies: Array = []
 var bullets: Array = []
@@ -46,12 +59,104 @@ func _ready() -> void:
 	cam = Camera2D.new()
 	add_child(cam)
 	randomize()
+	scores = _load_scores()
+	state = pending_state
+	pending_state = "menu"
+
+
+func _load_scores() -> Array:
+	if not FileAccess.file_exists(SCORE_FILE):
+		return []
+	var data = JSON.parse_string(FileAccess.get_file_as_string(SCORE_FILE))
+	var out: Array = []
+	if data is Array:
+		for d in data:
+			if d is Dictionary and d.has("name") and d.has("score"):
+				out.append({"name": str(d.name), "score": int(d.score)})
+	return out
+
+
+func _save_scores() -> void:
+	var f := FileAccess.open(SCORE_FILE, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(scores))
+
+
+func _qualifies(sc: int) -> bool:
+	return sc > 0 and (scores.size() < MAX_SCORES or sc > int(scores[-1].score))
+
+
+func _add_score(player_name: String) -> void:
+	scores.append({"name": player_name, "score": score})
+	scores.sort_custom(func(a, b): return a.score > b.score)
+	scores = scores.slice(0, MAX_SCORES)
+	_save_scores()
+
+
+func _go(next: String) -> void:
+	pending_state = next
+	get_tree().reload_current_scene()
+
+
+func _is_press(event: InputEvent) -> bool:
+	return (event is InputEventScreenTouch and event.pressed) \
+		or (event is InputEventKey and event.pressed and not event.echo)
+
+
+func _open_name_entry() -> void:
+	state = "name"
+	ui_layer = CanvasLayer.new()
+	add_child(ui_layer)
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	ui_layer.add_child(center)
+	var box := VBoxContainer.new()
+	box.custom_minimum_size = Vector2(320, 0)
+	box.add_theme_constant_override("separation", 14)
+	center.add_child(box)
+	var title := Label.new()
+	title.text = "NEUER HIGHSCORE: %d\nGib deinen Namen ein:" % score
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 26)
+	box.add_child(title)
+	name_edit = LineEdit.new()
+	name_edit.max_length = 12
+	name_edit.placeholder_text = "Name"
+	name_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_edit.add_theme_font_size_override("font_size", 28)
+	name_edit.text_submitted.connect(func(_t): _submit_name())
+	box.add_child(name_edit)
+	var ok := Button.new()
+	ok.text = "Speichern"
+	ok.add_theme_font_size_override("font_size", 24)
+	ok.pressed.connect(_submit_name)
+	box.add_child(ok)
+	name_edit.grab_focus.call_deferred()
+
+
+func _submit_name() -> void:
+	var n := name_edit.text.strip_edges()
+	if n.is_empty():
+		n = "Anonym"
+	_add_score(n)
+	last_score = score
+	_go("menu")
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if state == "name":
+		return
+	if state == "menu":
+		if _is_press(event) and not (event is InputEventKey and event.keycode == KEY_ESCAPE):
+			_go("play")
+		return
 	if state == "dead":
-		if (event is InputEventScreenTouch and event.pressed) or (event is InputEventKey and event.pressed):
-			get_tree().reload_current_scene()
+		if _is_press(event) and time_dead > 0.8:
+			if qualifies:
+				_open_name_entry()
+			else:
+				last_score = score
+				_go("menu")
 		return
 	if state == "levelup":
 		_handle_choice_input(event)
@@ -110,6 +215,8 @@ func _apply_upgrade(key: String) -> void:
 func _process(delta: float) -> void:
 	if state == "play":
 		_update(delta)
+	elif state == "dead":
+		time_dead += delta
 	cam.position = player_pos
 	queue_redraw()
 
@@ -180,6 +287,8 @@ func _update(delta: float) -> void:
 
 	if hp <= 0.0:
 		hp = 0.0
+		score = kills * 10 + int(time_alive)
+		qualifies = _qualifies(score)
 		state = "dead"
 
 
@@ -239,6 +348,10 @@ func _draw() -> void:
 	var vp := get_viewport_rect().size
 	var tl := player_pos - vp / 2.0
 
+	if state == "menu":
+		_draw_menu(tl, vp)
+		return
+
 	var step := 64.0
 	var gx := floorf(tl.x / step) * step
 	var gy := floorf(tl.y / step) * step
@@ -257,6 +370,32 @@ func _draw() -> void:
 	draw_circle(player_pos, PLAYER_RADIUS, Color(0.3, 1.0, 0.5))
 
 	_draw_hud(tl, vp)
+
+
+func _draw_menu(tl: Vector2, vp: Vector2) -> void:
+	var font := ThemeDB.fallback_font
+	draw_rect(Rect2(tl, vp), Color(0.07, 0.08, 0.12))
+	draw_string(font, tl + Vector2(0, 90), "SURVIVORS", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 64)
+	draw_string(font, tl + Vector2(0, 135), "Bestenliste – Top %d" % MAX_SCORES, HORIZONTAL_ALIGNMENT_CENTER, vp.x, 24)
+	var row_h := minf(34.0, (vp.y - 300.0) / MAX_SCORES)
+	var left := vp.x / 2.0 - 170.0
+	var highlighted := false
+	for i in MAX_SCORES:
+		var y := 180.0 + i * row_h
+		var col := Color(1, 1, 1, 0.9)
+		if i < scores.size():
+			if not highlighted and last_score >= 0 and scores[i].score == last_score:
+				col = Color(1.0, 0.9, 0.3)
+				highlighted = true
+			draw_string(font, tl + Vector2(left, y), "%2d." % (i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 22, col)
+			draw_string(font, tl + Vector2(left + 50, y), scores[i].name, HORIZONTAL_ALIGNMENT_LEFT, 180, 22, col)
+			draw_string(font, tl + Vector2(left, y), str(scores[i].score), HORIZONTAL_ALIGNMENT_RIGHT, 340, 22, col)
+		else:
+			draw_string(font, tl + Vector2(left, y), "%2d.  –" % (i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color(1, 1, 1, 0.3))
+	if last_score >= 0:
+		draw_string(font, tl + Vector2(0, vp.y - 90), "Letzter Score: %d" % last_score, HORIZONTAL_ALIGNMENT_CENTER, vp.x, 22, Color(1, 1, 1, 0.7))
+	var pulse := 0.6 + 0.4 * sin(Time.get_ticks_msec() / 300.0)
+	draw_string(font, tl + Vector2(0, vp.y - 40), "Tippen / Enter zum Starten", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 28, Color(0.3, 1.0, 0.5, pulse))
 
 
 func _draw_hud(tl: Vector2, vp: Vector2) -> void:
@@ -288,4 +427,8 @@ func _draw_hud(tl: Vector2, vp: Vector2) -> void:
 	elif state == "dead":
 		draw_rect(Rect2(tl, vp), Color(0.2, 0, 0, 0.65))
 		draw_string(font, tl + Vector2(0, vp.y / 2.0 - 20), "GAME OVER", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 48)
-		draw_string(font, tl + Vector2(0, vp.y / 2.0 + 30), "Beliebige Taste / Tippen für Neustart", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 22)
+		draw_string(font, tl + Vector2(0, vp.y / 2.0 + 30), "Score: %d" % score, HORIZONTAL_ALIGNMENT_CENTER, vp.x, 28)
+		if time_dead > 0.8:
+			draw_string(font, tl + Vector2(0, vp.y / 2.0 + 75), "Taste / Tippen zum Fortfahren", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 22)
+	elif state == "name":
+		draw_rect(Rect2(tl, vp), Color(0.07, 0.08, 0.12, 0.92))
